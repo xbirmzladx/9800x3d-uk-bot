@@ -8,7 +8,7 @@ from discord.ext import commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime, timezone
 
-# ────── Fix privileged intent warning ──────
+# ────── Intents (fixes privileged intent error) ──────
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
@@ -19,24 +19,20 @@ seen = set()
 # ────── Skinflint checker ──────
 async def check_skinflint(session):
     try:
-        async with session.get(
-            "https://skinflint.co.uk/amd-ryzen-7-9800x3d-a3336051.html",
-            timeout=15
-        ) as r:
-            if r.status != 200:
-                return None
+        async with session.get("https://skinflint.co.uk/amd-ryzen-7-9800x3d-a3336051.html", timeout=15) as r:
+            if r.status != 200: return None
             soup = BeautifulSoup(await r.text(), "html.parser")
             for item in soup.select("div.p")[:5]:
                 price_str = item.select_one("span.price").get_text(strip=True).replace("£", "").replace(",", "")
                 price = float(price_str)
-                if price < 449:  # change here if you want £439 etc.
+                if price < 449:  # ← change this number if you want £439 etc.
                     shop = item.select_one("span.vendor").get_text(strip=True)
                     link = "https://skinflint.co.uk" + item.select_one("a.p-name")["href"]
                     key = hashlib.md5(link.encode()).hexdigest()
                     if key not in seen:
                         seen.add(key)
                         return f"£{price:.2f} → {shop}\n{link}"
-    except:
+    except Exception as e:
         pass
     return None
 
@@ -48,11 +44,11 @@ async def check_hukd():
             if "9800X3D" in e.title.upper() and e.link not in seen:
                 seen.add(e.link)
                 return f"HUKD DEAL!\n{e.title}\n{e.link}"
-    except:
+    except Exception as e:
         pass
     return None
 
-# ────── Main scan function (awaits everything properly) ──────
+# ────── Main scanning function ──────
 async def scan_deals():
     channel = bot.get_channel(int(os.getenv("CHANNEL_ID")))
     if not channel:
@@ -61,19 +57,17 @@ async def scan_deals():
     async with aiohttp.ClientSession() as session:
         alerts = []
 
-        skinflint_result = await check_skinflint(session)
-        if skinflint_result:
-            alerts.append(skinflint_result)
+        result = await check_skinflint(session)
+        if result: alerts.append(result)
 
-        hukd_result = await check_hukd()
-        if hukd_result:
-            alerts.append(hukd_result)
+        result = await check_hukd()
+        if result: alerts.append(result)
 
         for text in alerts:
             embed = discord.Embed(
                 description=text,
                 color=0xff0000,
-                timestamp=datetime.now(timezone.utc)   # ← fixes utcnow() deprecation
+                timestamp=datetime.now(timezone.utc)
             )
             embed.set_author(name="9800X3D UNDER £449!", icon_url="https://i.imgur.com/2JLcV4A.png")
             await channel.send("@everyone", embed=embed)
@@ -83,9 +77,25 @@ async def scan_deals():
 async def on_ready():
     print(f"Bot {bot.user} is LIVE – hunting 9800X3D 24/7")
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(scan_deals, "interval", minutes=3)   # ← correct function name
+    scheduler.add_job(scan_deals, "interval", minutes=3)
     scheduler.start()
-    await scan_deals()   # first immediate scan
+    await scan_deals()
 
-# ────── Start the bot ──────
-bot.run(os.getenv("TOKEN"))
+# ────── DUMMY WEB SERVER TO MAKE RENDER HAPPY (eliminates port warning) ──────
+from fastapi import FastAPI
+import uvicorn
+import threading
+
+app = FastAPI(title="9800X3D Sniper")
+
+@app.get("/")
+async def root():
+    return {"message": "9800X3D sniper bot is alive and hunting!"}
+
+def run_web():
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)), log_level="error")
+
+# Start tiny web server in background + Discord bot
+if __name__ == "__main__":
+    threading.Thread(target=run_web, daemon=True).start()
+    bot.run(os.getenv("TOKEN"))
