@@ -1,74 +1,91 @@
 import discord
-from discord.ext import commands
-import aiohttp
-from bs4 import BeautifulSoup
-import feedparser
 import os
+import aiohttp
+import feedparser
 import hashlib
-from datetime import datetime
+from bs4 import BeautifulSoup
+from discord.ext import commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from dotenv import load_dotenv
+from datetime import datetime, timezone
 
-load_dotenv()
-
+# ────── Fix privileged intent warning ──────
 intents = discord.Intents.default()
+intents.message_content = True
+intents.guilds = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
+seen = set()
 
-seen_deals = set()
-PRICE_THRESHOLD = int(os.getenv("PRICE_THRESHOLD", "449"))  # Change in Render env vars
-
+# ────── Skinflint checker ──────
 async def check_skinflint(session):
-    url = "https://skinflint.co.uk/amd-ryzen-7-9800x3d-a3336051.html"
-    async with session.get(url, timeout=15) as resp:
-        if resp.status != 200: return None
-        soup = BeautifulSoup(await resp.text(), "html.parser")
-        for item in soup.select("div.p")[:5]:
-            price_tag = item.select_one("span.price")
-            if not price_tag: continue
-            price = price_tag.text.strip().replace("£", "").replace(",", "")
-            if not price.replace(".", "").isdigit(): continue
-            price = float(price)
-            if price > PRICE_THRESHOLD: continue
-            
-            shop = item.select_one("span.vendor").text.strip()
-            link = "https://skinflint.co.uk" + item.select_one("a.p-name")["href"]
-            key = hashlib.md5(f"{price}{shop}{link}".encode()).hexdigest()
-            if key not in seen_deals:
-                seen_deals.add(key)
-                return f"£{price:.2f} → {shop}\n{link}"
+    try:
+        async with session.get(
+            "https://skinflint.co.uk/amd-ryzen-7-9800x3d-a3336051.html",
+            timeout=15
+        ) as r:
+            if r.status != 200:
+                return None
+            soup = BeautifulSoup(await r.text(), "html.parser")
+            for item in soup.select("div.p")[:5]:
+                price_str = item.select_one("span.price").get_text(strip=True).replace("£", "").replace(",", "")
+                price = float(price_str)
+                if price < 449:  # change here if you want £439 etc.
+                    shop = item.select_one("span.vendor").get_text(strip=True)
+                    link = "https://skinflint.co.uk" + item.select_one("a.p-name")["href"]
+                    key = hashlib.md5(link.encode()).hexdigest()
+                    if key not in seen:
+                        seen.add(key)
+                        return f"£{price:.2f} → {shop}\n{link}"
+    except:
+        pass
     return None
 
+# ────── HotUKDeals checker ──────
 async def check_hukd():
-    feed = feedparser.parse("https://www.hotukdeals.com/tag/amd-ryzen/rss")
-    for entry in feed.entries[:10]:
-        if "9800X3D" in entry.title.upper() and entry.link not in seen_deals:
-            seen_deals.add(entry.link)
-            return f"HUKD ALERT\n{entry.title}\n{entry.link}"
+    try:
+        feed = feedparser.parse("https://www.hotukdeals.com/tag/amd-ryzen/rss")
+        for e in feed.entries[:10]:
+            if "9800X3D" in e.title.upper() and e.link not in seen:
+                seen.add(e.link)
+                return f"HUKD DEAL!\n{e.title}\n{e.link}"
+    except:
+        pass
     return None
 
-async def scan():
-    channel_id = int(os.getenv("CHANNEL_ID"))
-    channel = bot.get_channel(channel_id)
-    if not channel: return
+# ────── Main scan function (awaits everything properly) ──────
+async def scan_deals():
+    channel = bot.get_channel(int(os.getenv("CHANNEL_ID")))
+    if not channel:
+        return
 
     async with aiohttp.ClientSession() as session:
         alerts = []
-        skin = await check_skinflint(session)
-        if skin: alerts.append(skin)
-        hukd = check_hukd()
-        if hukd: alerts.append(hukd)
 
-        for alert in alerts:
-            embed = discord.Embed(description=alert, color=0xff0000, timestamp=datetime.utcnow())
+        skinflint_result = await check_skinflint(session)
+        if skinflint_result:
+            alerts.append(skinflint_result)
+
+        hukd_result = await check_hukd()
+        if hukd_result:
+            alerts.append(hukd_result)
+
+        for text in alerts:
+            embed = discord.Embed(
+                description=text,
+                color=0xff0000,
+                timestamp=datetime.now(timezone.utc)   # ← fixes utcnow() deprecation
+            )
             embed.set_author(name="9800X3D UNDER £449!", icon_url="https://i.imgur.com/2JLcV4A.png")
             await channel.send("@everyone", embed=embed)
 
+# ────── Bot ready ──────
 @bot.event
 async def on_ready():
-    print(f"{bot.user} is LIVE – hunting 9800X3D deals 24/7")
+    print(f"Bot {bot.user} is LIVE – hunting 9800X3D 24/7")
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(scan, "interval", minutes=3)
+    scheduler.add_job(scan_deals, "interval", minutes=3)   # ← correct function name
     scheduler.start()
-    await scan()
+    await scan_deals()   # first immediate scan
 
-bot.run(os.getenv("DISCORD_TOKEN"))
+# ────── Start the bot ──────
+bot.run(os.getenv("TOKEN"))
